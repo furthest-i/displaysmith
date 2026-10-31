@@ -1,0 +1,20 @@
+[package]
+name = "displaysmith"
+version = "0.1.0"
+edition = "2024"
+description = "DisplaySmith - macOS 显示分辨率管理工具（菜单栏 + 设置窗口）"
+license = "MIT"
+
+[dependencies]
+# glow 后端（OpenGL）：体积最小；显式关闭默认的 wgpu
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+tray-icon = "0.26.1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+codegen-units = 1   # 单编译单元，让 LLVM 优化更彻底
+lto = "fat"         # 链接期全量优化
+opt-level = "s"     # 优化目标从速度改为体积
+panic = "abort"     # 去掉 panic 展开处理
+strip = true        # 剥离调试符号
