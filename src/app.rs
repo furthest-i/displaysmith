@@ -97,31 +97,33 @@ impl DisplaySmithApp {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.heading("DisplaySmith");
-                ui.separator();
-                ui.label("显示器:");
-                let selected_text = self
-                    .current_display()
-                    .map(|d| d.title.clone())
-                    .unwrap_or_else(|| "无显示器".to_owned());
-                let mut picked: Option<usize> = None;
-                egui::ComboBox::from_id_salt("display_select")
-                    .selected_text(selected_text)
-                    .show_ui(ui, |ui| {
-                        for (index, display) in self.displays.iter().enumerate() {
-                            if ui
-                                .selectable_value(&mut self.selected, index, &display.title)
-                                .clicked()
-                            {
-                                picked = Some(index);
+                // 控件组推到工具栏右侧，避免与大标题混排导致基线错位
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("刷新").clicked() {
+                        self.refresh();
+                    }
+                    let selected_text = self
+                        .current_display()
+                        .map(|d| d.title.clone())
+                        .unwrap_or_else(|| "无显示器".to_owned());
+                    let mut picked: Option<usize> = None;
+                    egui::ComboBox::from_id_salt("display_select")
+                        .selected_text(selected_text)
+                        .show_ui(ui, |ui| {
+                            for (index, display) in self.displays.iter().enumerate() {
+                                if ui
+                                    .selectable_value(&mut self.selected, index, &display.title)
+                                    .clicked()
+                                {
+                                    picked = Some(index);
+                                }
                             }
-                        }
-                    });
-                if let Some(index) = picked {
-                    self.select_display(index);
-                }
-                if ui.button("刷新").clicked() {
-                    self.refresh();
-                }
+                        });
+                    if let Some(index) = picked {
+                        self.select_display(index);
+                    }
+                    ui.label("显示器:");
+                });
             });
             ui.add_space(4.0);
         });
@@ -140,32 +142,48 @@ impl DisplaySmithApp {
                 ui.label("未检测到显示器");
                 return;
             };
-            ui.horizontal_wrapped(|ui| {
-                ui.strong(&display.title);
-                if display.is_main {
-                    badge(ui, "主显示器", Color32::from_rgb(96, 165, 250));
-                }
-                if display.is_builtin {
-                    badge(ui, "内建", Color32::from_rgb(134, 200, 134));
-                }
-            });
-            ui.add_space(2.0);
-            let current = &display.current;
-            ui.monospace(format!(
-                "当前: {}x{} (像素 {}x{}) · {} @ {:.0} Hz",
-                current.logical_width,
-                current.logical_height,
-                current.pixel_width,
-                current.pixel_height,
-                current.aspect_label(),
-                current.refresh_hz
-            ));
-            ui.horizontal(|ui| {
-                ui.label(format!("位置: ({}, {})", display.origin.0, display.origin.1));
-                if current.is_hidpi() {
-                    badge(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
-                }
-            });
+            // 两列 Grid：标签列宽度统一，值列从同一横坐标起始
+            egui::Grid::new("status_grid")
+                .num_columns(2)
+                .spacing([20.0, 3.0])
+                .show(ui, |ui| {
+                    ui.strong("显示器");
+                    ui.horizontal(|ui| {
+                        ui.strong(&display.title);
+                        if display.is_main {
+                            tinted(ui, "主显示器", Color32::from_rgb(96, 165, 250));
+                        }
+                        if display.is_builtin {
+                            tinted(ui, "内建", Color32::from_rgb(134, 200, 134));
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.strong("当前模式");
+                    let current = &display.current;
+                    ui.horizontal(|ui| {
+                        ui.monospace(format!(
+                            "{}x{} (像素 {}x{}) · {} · {:.0} Hz",
+                            current.logical_width,
+                            current.logical_height,
+                            current.pixel_width,
+                            current.pixel_height,
+                            current.aspect_label(),
+                            current.refresh_hz
+                        ));
+                        if current.is_hidpi() {
+                            tinted(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
+                        }
+                    });
+                    ui.end_row();
+
+                    ui.strong("位置");
+                    ui.monospace(format!(
+                        "({}, {})",
+                        display.origin.0, display.origin.1
+                    ));
+                    ui.end_row();
+                });
         });
     }
 
@@ -192,11 +210,11 @@ impl DisplaySmithApp {
                         ui.monospace(mode.aspect_label());
                         ui.monospace(format!("{:.0} Hz", mode.refresh_hz));
                         if mode.is_hidpi() {
-                            badge(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
+                            tinted(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
                         } else {
                             ui.weak("—");
                         }
-                        if ui.small_button("应用").clicked() {
+                        if ui.link("应用").clicked() {
                             // 下一阶段实现：CGBeginDisplayConfiguration 事务提交
                             log::info!("应用模式 {} (待实现)", mode.pixel_label());
                         }
@@ -239,15 +257,9 @@ impl eframe::App for DisplaySmithApp {
     }
 }
 
-/// 徽章样式标签（egui 0.37 移除了内置 badge，此处自行封装）
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.22))
-        .corner_radius(4.0)
-        .inner_margin(egui::Margin::symmetric(4, 1))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).small().color(color));
-        });
+/// 着色文本标签：高度与正文一致，避免 Frame 徽章把单元格行高撑出参差
+fn tinted(ui: &mut egui::Ui, text: &str, color: Color32) {
+    ui.label(RichText::new(text).small().color(color));
 }
 
 /// 表格表头行：逐列渲染加粗标题后收行
