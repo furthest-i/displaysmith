@@ -13,6 +13,26 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // 自检开关：对主显示器重新应用其当前模式，完整验证配置事务链路而不产生视觉变化
+    if std::env::args().any(|arg| arg == "--apply-self-test") {
+        let displays = display::list_displays();
+        let Some(main_display) = displays.iter().find(|d| d.is_main) else {
+            eprintln!("self-test 失败: 未找到主显示器");
+            std::process::exit(1);
+        };
+        match display::apply_mode(main_display.id, &main_display.current) {
+            Ok(()) => println!(
+                "self-test 通过: 主显示器事务链路正常 ({})",
+                main_display.current.pixel_label()
+            ),
+            Err(err) => {
+                eprintln!("self-test 失败: {err}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([920.0, 620.0])

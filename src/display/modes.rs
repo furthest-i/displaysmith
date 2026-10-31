@@ -10,6 +10,14 @@ pub type CfStringRef = *const c_void;
 pub type CfMutableDictionaryRef = *mut c_void;
 pub type CfArrayRef = *const c_void;
 pub type CgDisplayModeRef = *mut c_void;
+/// 显示配置事务句柄（opaque）
+pub type CgDisplayConfigRef = *mut c_void;
+
+/// 配置生效范围：永久（写入系统偏好，重启后保留）。
+/// 0 = 仅当前应用，1 = 仅本次会话，2 = 永久
+const K_CG_CONFIGURE_PERMANENTLY: u32 = 2;
+/// 浮点刷新率匹配容差：59.94 与 59.940001 视为同一模式
+const REFRESH_MATCH_TOLERANCE_HZ: f64 = 0.01;
 
 /// CGDisplayBounds 返回的几何结构（与 CGGeometry 头文件布局一致）
 #[repr(C)]
@@ -47,6 +55,7 @@ unsafe extern "C" {
         value_callbacks: *const c_void,
     ) -> CfMutableDictionaryRef;
     fn CFDictionarySetValue(dict: CfMutableDictionaryRef, key: *const c_void, value: *const c_void);
+    fn CFRetain(cf: *const c_void);
     fn CFArrayGetCount(array: CfArrayRef) -> isize;
     fn CFArrayGetValueAtIndex(array: CfArrayRef, index: isize) -> *const c_void;
     fn CFRelease(cf: *const c_void);
@@ -64,6 +73,15 @@ unsafe extern "C" {
     fn CGDisplayIsBuiltin(display: CgDisplayId) -> u8;
     fn CGDisplayCopyAllDisplayModes(display: CgDisplayId, options: *const c_void) -> CfArrayRef;
     fn CGDisplayCopyDisplayMode(display: CgDisplayId) -> CgDisplayModeRef;
+    fn CGBeginDisplayConfiguration(config: *mut CgDisplayConfigRef) -> c_int;
+    fn CGConfigureDisplayWithDisplayMode(
+        config: CgDisplayConfigRef,
+        display: CgDisplayId,
+        mode: CgDisplayModeRef,
+        options: CfStringRef,
+    ) -> c_int;
+    fn CGCompleteDisplayConfiguration(config: CgDisplayConfigRef, option: u32) -> c_int;
+    fn CGCancelDisplayConfiguration(config: CgDisplayConfigRef) -> c_int;
     fn CGDisplayModeGetWidth(mode: CgDisplayModeRef) -> usize;
     fn CGDisplayModeGetHeight(mode: CgDisplayModeRef) -> usize;
     fn CGDisplayModeGetPixelWidth(mode: CgDisplayModeRef) -> usize;
@@ -189,18 +207,7 @@ pub fn list_displays() -> Vec<DisplayInfo> {
 /// 枚举某台显示器的全部显示模式（含 HiDPI 缩放档位），按像素面积与刷新率降序
 pub fn list_modes(display_id: CgDisplayId) -> Vec<DisplayModeInfo> {
     unsafe {
-        // options: { kCGDisplayShowDuplicateLowResolutionModes: true }
-        // 不传该选项时系统只返回"安全"模式，会漏掉 HiDPI 缩放档位
-        let dict = CFDictionaryCreateMutable(
-            std::ptr::null(),
-            1,
-            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const c_void,
-            &kCFTypeDictionaryValueCallBacks as *const u8 as *const c_void,
-        );
-        CFDictionarySetValue(dict, K_SHOW_DUPLICATE_LOW_RES, kCFBooleanTrue);
-        let array = CGDisplayCopyAllDisplayModes(display_id, dict);
-        CFRelease(dict);
-
+        let array = CGDisplayCopyAllDisplayModes(display_id, duplicate_mode_options());
         if array.is_null() {
             return Vec::new();
         }
@@ -221,6 +228,85 @@ pub fn list_modes(display_id: CgDisplayId) -> Vec<DisplayModeInfo> {
                 })
         });
         modes
+    }
+}
+
+unsafe fn duplicate_mode_options() -> CfMutableDictionaryRef {
+    // options: { kCGDisplayShowDuplicateLowResolutionModes: true }
+    // 不传该选项时系统只返回"安全"模式，会漏掉 HiDPI 缩放档位
+    unsafe {
+        let dict = CFDictionaryCreateMutable(
+            std::ptr::null(),
+            1,
+            &kCFTypeDictionaryKeyCallBacks as *const u8 as *const c_void,
+            &kCFTypeDictionaryValueCallBacks as *const u8 as *const c_void,
+        );
+        CFDictionarySetValue(dict, K_SHOW_DUPLICATE_LOW_RES, kCFBooleanTrue);
+        dict
+    }
+}
+
+/// 将显示器切换到指定模式（事务式，永久生效，重启后保留）。
+///
+/// CoreGraphics 要求传入 CGDisplayModeRef，而模式列表只保存了解析后的值，
+/// 因此这里重新枚举一次，按 逻辑尺寸/像素尺寸/刷新率/IO 标志 四元组精确匹配。
+pub fn apply_mode(display_id: CgDisplayId, target: &DisplayModeInfo) -> Result<(), String> {
+    unsafe {
+        let array = CGDisplayCopyAllDisplayModes(display_id, duplicate_mode_options());
+        if array.is_null() {
+            return Err("无法获取该显示器的模式列表".to_owned());
+        }
+        let count = CFArrayGetCount(array);
+        let mut matched: Option<CgDisplayModeRef> = None;
+        for i in 0..count {
+            let mode_ref = CFArrayGetValueAtIndex(array, i) as CgDisplayModeRef;
+            if mode_matches(mode_ref, target) {
+                matched = Some(mode_ref);
+                break;
+            }
+        }
+        // 模式引用由数组持有：先 CFRetain 目标模式，再释放数组，避免悬垂
+        let Some(mode_ref) = matched else {
+            CFRelease(array);
+            return Err("目标模式已不在当前列表中，请刷新后重试".to_owned());
+        };
+        CFRetain(mode_ref);
+        CFRelease(array);
+
+        let result = commit_mode(display_id, mode_ref);
+        CFRelease(mode_ref);
+        result
+    }
+}
+
+fn mode_matches(mode_ref: CgDisplayModeRef, target: &DisplayModeInfo) -> bool {
+    let candidate = parse_mode(mode_ref);
+    candidate.logical_width == target.logical_width
+        && candidate.logical_height == target.logical_height
+        && candidate.pixel_width == target.pixel_width
+        && candidate.pixel_height == target.pixel_height
+        && (candidate.refresh_hz - target.refresh_hz).abs() < REFRESH_MATCH_TOLERANCE_HZ
+        && candidate.io_flags == target.io_flags
+}
+
+/// 三段事务提交：Begin → Configure → Complete，任一步失败即回滚
+fn commit_mode(display_id: CgDisplayId, mode_ref: CgDisplayModeRef) -> Result<(), String> {
+    unsafe {
+        let mut config: CgDisplayConfigRef = std::ptr::null_mut();
+        let err = CGBeginDisplayConfiguration(&mut config);
+        if err != 0 {
+            return Err(format!("打开显示配置事务失败 (CGError {err})"));
+        }
+        let err = CGConfigureDisplayWithDisplayMode(config, display_id, mode_ref, std::ptr::null());
+        if err != 0 {
+            CGCancelDisplayConfiguration(config);
+            return Err(format!("配置显示模式失败 (CGError {err})"));
+        }
+        let err = CGCompleteDisplayConfiguration(config, K_CG_CONFIGURE_PERMANENTLY);
+        if err != 0 {
+            return Err(format!("提交显示配置失败 (CGError {err})"));
+        }
+        Ok(())
     }
 }
 
@@ -320,5 +406,68 @@ mod tests {
     #[test]
     fn zero_size_uses_placeholder() {
         assert_eq!(mode(0, 0).aspect_label(), "-");
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+
+    #[test]
+    fn mode_matches_ignores_float_noise() {
+        let target = DisplayModeInfo {
+            logical_width: 1512,
+            logical_height: 982,
+            pixel_width: 3024,
+            pixel_height: 1964,
+            refresh_hz: 119.97,
+            io_flags: 2,
+        };
+        let same = DisplayModeInfo { refresh_hz: 119.9700001, ..target };
+        let diff = DisplayModeInfo { refresh_hz: 59.94, ..target };
+        // 同源枚举的浮点噪声应视为同一模式；刷新率不同则不匹配
+        assert!((same.refresh_hz - target.refresh_hz).abs() < REFRESH_MATCH_TOLERANCE_HZ);
+        assert!((diff.refresh_hz - target.refresh_hz).abs() >= REFRESH_MATCH_TOLERANCE_HZ);
+    }
+}
+
+#[cfg(test)]
+mod real_switch_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 真实切换验证：选一台显示器，保持分辨率不变，仅切换刷新率后切回。
+    /// 分辨率不变则桌面不重排，视觉几乎无感；需在有屏环境手动运行：
+    /// `cargo test real_mode_switch -- --ignored --nocapture`
+    #[test]
+    #[ignore = "真实切换显示器模式，手动在有屏环境运行"]
+    fn real_mode_switch_round_trip() {
+        let displays = list_displays();
+        println!("枚举到 {} 台显示器", displays.len());
+        // 优先外接屏；只有内建屏时用主显示器（内建屏同样有 ProMotion 多档刷新率）
+        let target_display = displays
+            .iter()
+            .find(|d| !d.is_builtin)
+            .or_else(|| displays.iter().find(|d| d.is_main))
+            .expect("至少存在一台显示器");
+        let current = target_display.current;
+        let modes = list_modes(target_display.id);
+        let Some(alt) = modes.iter().find(|m| {
+            m.pixel_width == current.pixel_width
+                && m.pixel_height == current.pixel_height
+                && (m.refresh_hz - current.refresh_hz).abs() > 1.0
+        }) else {
+            println!("无同分辨率的其他刷新率档位，跳过");
+            return;
+        };
+
+        let alt_label = format!("{} @ {:.0}Hz", alt.pixel_label(), alt.refresh_hz);
+        println!("切换: {:.0}Hz -> {:.0}Hz", current.refresh_hz, alt.refresh_hz);
+        apply_mode(target_display.id, alt).expect("切换到新刷新率失败");
+        std::thread::sleep(Duration::from_millis(1500));
+
+        println!("切回: {:.0}Hz", current.refresh_hz);
+        apply_mode(target_display.id, &current).expect("切回原刷新率失败");
+        println!("round-trip 通过 ({alt_label} 往返)");
     }
 }

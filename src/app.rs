@@ -4,6 +4,8 @@
 //! - `logic`：窗口隐藏时也会被调用，托盘命令轮询放在这里，保证隐藏后仍可响应菜单；
 //! - `ui`：每次重绘调用，负责全部界面绘制。
 
+use std::time::{Duration, Instant};
+
 use eframe::egui::{self, Color32, Context, RichText};
 
 use crate::display::{self, DisplayInfo, DisplayModeInfo};
@@ -12,6 +14,8 @@ use crate::tray::{Tray, TrayCommand};
 
 /// 托盘命令轮询间隔。静态界面下以极低频率唤醒，等待菜单栏点击。
 const TRAY_POLL_INTERVAL_MS: u64 = 200;
+/// 状态消息的展示时长，超时自动消失
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(5);
 
 pub struct DisplaySmithApp {
     tray: Option<Tray>,
@@ -19,6 +23,9 @@ pub struct DisplaySmithApp {
     modes: Vec<DisplayModeInfo>,
     selected: usize,
     fonts_ok: bool,
+    /// 底部状态栏的临时消息（如切换结果反馈）
+    status_message: Option<String>,
+    status_until: Option<Instant>,
 }
 
 impl DisplaySmithApp {
@@ -39,6 +46,8 @@ impl DisplaySmithApp {
             modes,
             selected: 0,
             fonts_ok,
+            status_message: None,
+            status_until: None,
         }
     }
 
@@ -70,6 +79,45 @@ impl DisplaySmithApp {
             .current_display()
             .map(|d| display::list_modes(d.id))
             .unwrap_or_default();
+    }
+
+    /// 将当前显示器切换到指定模式，并在底部状态栏反馈结果
+    fn apply_mode(&mut self, target: DisplayModeInfo) {
+        let Some(display) = self.current_display() else {
+            return;
+        };
+        let display_id = display.id;
+        match display::apply_mode(display_id, &target) {
+            Ok(()) => {
+                let message = format!(
+                    "已切换到 {} @ {:.0} Hz",
+                    target.pixel_label(),
+                    target.refresh_hz
+                );
+                log::info!("{message}");
+                self.set_status_message(message);
+                self.refresh();
+            }
+            Err(err) => {
+                log::error!("应用模式失败: {err}");
+                self.set_status_message(format!("切换失败: {err}"));
+            }
+        }
+    }
+
+    fn set_status_message(&mut self, message: String) {
+        self.status_message = Some(message);
+        self.status_until = Some(Instant::now() + STATUS_MESSAGE_TTL);
+    }
+
+    /// 状态消息到期后清除
+    fn expire_status_message(&mut self) {
+        if let Some(until) = self.status_until {
+            if Instant::now() >= until {
+                self.status_message = None;
+                self.status_until = None;
+            }
+        }
     }
 
     fn handle_tray(&mut self, ctx: &Context) {
@@ -187,7 +235,7 @@ impl DisplaySmithApp {
         });
     }
 
-    fn draw_mode_table(&self, ui: &mut egui::Ui) {
+    fn draw_mode_table(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.strong(format!("可用显示模式（{} 个）", self.modes.len()));
         ui.add_space(2.0);
@@ -201,6 +249,8 @@ impl DisplaySmithApp {
                 .show(ui, |ui| {
                     draw_table_header(ui, &["像素分辨率", "逻辑分辨率", "比例", "刷新率", "缩放", "操作"]);
 
+                    // 先收集点击、循环结束后再应用：避免迭代借用与可变刷新冲突
+                    let mut clicked: Option<DisplayModeInfo> = None;
                     for mode in &self.modes {
                         ui.monospace(mode.pixel_label());
                         ui.weak(format!(
@@ -215,10 +265,12 @@ impl DisplaySmithApp {
                             ui.weak("—");
                         }
                         if ui.link("应用").clicked() {
-                            // 下一阶段实现：CGBeginDisplayConfiguration 事务提交
-                            log::info!("应用模式 {} (待实现)", mode.pixel_label());
+                            clicked = Some(*mode);
                         }
                         ui.end_row();
+                    }
+                    if let Some(target) = clicked {
+                        self.apply_mode(target);
                     }
                 });
         });
@@ -236,7 +288,9 @@ impl DisplaySmithApp {
                     if !self.fonts_ok {
                         ui.small(RichText::new("中文字体未加载").color(Color32::from_rgb(230, 170, 70)));
                     }
-                    ui.small("「应用」按钮将在私有 API 阶段接入");
+                    if let Some(message) = &self.status_message {
+                        ui.small(RichText::new(message).color(Color32::from_rgb(134, 200, 134)));
+                    }
                 });
             });
         });
@@ -247,6 +301,7 @@ impl eframe::App for DisplaySmithApp {
     /// 窗口隐藏时也会被调用：托盘命令轮询 + 低频唤醒兜底
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         self.handle_tray(ctx);
+        self.expire_status_message();
         ctx.request_repaint_after(std::time::Duration::from_millis(TRAY_POLL_INTERVAL_MS));
     }
 

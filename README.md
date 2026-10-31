@@ -11,7 +11,7 @@ macOS 显示器分辨率管理工具。菜单栏常驻 + 设置窗口，目标�
 | 显示器识别 | ✅ 已实现 | 内建/外接识别、主屏判断、位置坐标 |
 | 分辨率列表 | ✅ 已实现 | 含 HiDPI 缩放档位（`kCGDisplayShowDuplicateLowResolutionModes`） |
 | 切换显示器 | ✅ 已实现 | 下拉选择，模式列表联动加载 |
-| 应用模式 | ⏳ 下一阶段 | `CGBeginDisplayConfiguration` 事务提交 |
+| 应用模式 | ✅ 已实现 | 三段事务（Begin/Configure/Complete），永久生效，失败自动回滚 |
 | 自定义分辨率 | ⏳ 规划中 | DisplayServices / CGVirtualDisplay 私有 API |
 | 菜单栏弹出面板 | ⏳ 规划中 | 当前为菜单 + 常驻窗口形态 |
 
@@ -52,11 +52,17 @@ src/
 - **egui 0.37 UI API 变化**：App trait 的 `update` 拆分为 `logic` + `ui(ui)`；
   面板统一为 `egui::Panel`，且 `show` 挂在 `Ui` 上；内置 badge 被移除，自行封装。
 
+## 验证
+
+```bash
+cargo test                                            # 单元测试（8 个）
+./target/debug/displaysmith --apply-self-test         # 主显示器事务链路自检（无视觉变化）
+cargo test real_mode_switch -- --ignored --nocapture  # 真实切换往返（分辨率不变，仅切刷新率）
+```
+
 ## 下一阶段 TODO
 
-1. 应用显示模式：`CGBeginDisplayConfiguration` / `CGConfigureDisplayWithDisplayMode` /
-   `CGCompleteDisplayConfiguration`（公开 API，事务式）
-2. 菜单栏点击弹出面板：取 `NSStatusItem` frame 定位窗口
+1. 菜单栏点击弹出面板：取 `NSStatusItem` frame 定位窗口
 3. 私有 API 探索：DisplayServices 枚举全量模式 + Sehozera 15+ 回落逻辑（参考 macdisp）
 4. LSUIElement（隐藏 Dock 图标）：`cargo-bundle` 打包时配置 Info.plist
 5. 显示器插拔回调：`CGDisplayRegisterReconfigurationCallback` 自动刷新列表
