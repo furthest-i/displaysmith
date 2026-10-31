@@ -67,7 +67,7 @@ unsafe extern "C" {
     #[link_name = "kCGDisplayShowDuplicateLowResolutionModes"]
     static K_SHOW_DUPLICATE_LOW_RES: CfStringRef;
 
-    fn CGGetActiveDisplayList(max_displays: u32, displays: *mut CgDisplayId, count: *mut u32) -> c_int;
+    fn CGGetOnlineDisplayList(max_displays: u32, displays: *mut CgDisplayId, count: *mut u32) -> c_int;
     fn CGMainDisplayID() -> CgDisplayId;
     fn CGDisplayBounds(display: CgDisplayId) -> CGRect;
     fn CGDisplayIsBuiltin(display: CgDisplayId) -> u8;
@@ -91,7 +91,7 @@ unsafe extern "C" {
 }
 
 /// 一台显示器的基础信息
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DisplayInfo {
     pub id: CgDisplayId,
     pub title: String,
@@ -137,6 +137,12 @@ const COMMON_ASPECTS: &[(usize, usize)] = &[
 /// 比例匹配容差。取 2.5%：覆盖 21:9 的行业口径（3440x1440 实为 2.39，业内统称 21:9），
 /// 同时不会把 16:10（1.60）误判成 3:2（1.50），两者相差 6.3%，安全。
 const ASPECT_MATCH_TOLERANCE: f64 = 0.025;
+
+impl std::fmt::Display for DisplayInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.title)
+    }
+}
 
 impl DisplayModeInfo {
     /// 像素分辨率短格式，如 "3024x1890"
@@ -304,6 +310,10 @@ fn commit_mode(display_id: CgDisplayId, mode_ref: CgDisplayModeRef) -> Result<()
         }
         let err = CGCompleteDisplayConfiguration(config, K_CG_CONFIGURE_PERMANENTLY);
         if err != 0 {
+            // 1014 为 WindowServer 私有错误码：显示器睡眠/不可用时无法完成模式切换
+            if err == 1014 {
+                return Err("显示器当前不可用（可能正在睡眠），唤醒屏幕后重试".to_owned());
+            }
             return Err(format!("提交显示配置失败 (CGError {err})"));
         }
         Ok(())
@@ -314,7 +324,9 @@ fn display_ids() -> Vec<CgDisplayId> {
     unsafe {
         let mut ids = [0u32; 16];
         let mut count: u32 = 0;
-        if CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) == 0 {
+        // Online 而非 Active：屏幕睡眠时 Active 列表为空，会导致"0 台显示器"的误报；
+        // Online 列表包含所有物理在线的显示器，与菜单栏工具的语义一致
+        if CGGetOnlineDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) == 0 {
             ids[..count as usize].to_vec()
         } else {
             Vec::new()

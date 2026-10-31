@@ -1,16 +1,15 @@
 //! DisplaySmith — macOS 显示器分辨率管理工具
 //!
-//! 入口：初始化日志，以 glow 后端启动 eframe 主窗口。
-//! 托盘图标在 App 构建时创建，由 App 持有保活。
+//! 入口：初始化日志，以 iced（Elm 架构）运行。
+//! release 构建启动时不弹窗口，仅驻留菜单栏，面板由托盘"打开主面板"按需打开。
 
 mod app;
 mod display;
-mod fonts;
 mod tray;
 
-use eframe::egui;
+use iced::{window, Theme};
 
-fn main() -> eframe::Result<()> {
+fn main() -> iced::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // 自检开关：对主显示器重新应用其当前模式，完整验证配置事务链路而不产生视觉变化
@@ -33,17 +32,22 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([920.0, 620.0])
-            .with_min_inner_size([740.0, 480.0]),
-        renderer: eframe::Renderer::Glow,
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "DisplaySmith",
-        options,
-        Box::new(|cc| Ok(Box::new(app::DisplaySmithApp::new(cc)))),
+    iced::application(
+        || app::DisplaySmith::default(),
+        app::update,
+        app::view,
     )
+    .subscription(app::subscription)
+    .theme(Theme::Dark)
+    .title("DisplaySmith")
+    .window(window::Settings {
+        size: iced::Size::new(920.0, 620.0),
+        min_size: Some(iced::Size::new(740.0, 480.0)),
+        // release 面向菜单栏形态：启动不弹窗，面板由托盘按需打开；debug 直接显示便于开发
+        visible: cfg!(debug_assertions),
+        // 关闭窗口仅收起面板，应用随托盘常驻
+        exit_on_close_request: false,
+        ..Default::default()
+    })
+    .run()
 }

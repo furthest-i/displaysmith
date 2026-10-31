@@ -1,18 +1,25 @@
-//! 菜单栏托盘：图标 + 菜单 + 事件轮询。
+//! 菜单栏托盘：图标 + 菜单 + 事件流。
 //!
-//! 事件不跨线程直接驱动 UI：App::update 每帧 try_recv 一条菜单命令，
-//! 再通过 ViewportCommand 作用于窗口，全部在主线程完成，避免 Send 约束问题。
+//! iced 侧通过 `Subscription::run(tray_stream)` 订阅菜单命令，
+//! 命令以 Message 推入 update，全程在 iced 的运行时内流转。
 
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use std::time::Duration;
+
+use iced::futures::Stream;
+use iced::futures::channel::mpsc::Sender;
+use iced::futures::SinkExt;
+use iced::stream;
+use tray_icon::menu::{Menu, MenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-const MENU_TOGGLE_ID: &str = "toggle_window";
-const MENU_QUIT_ID: &str = "quit";
+/// 托盘菜单项 id
+pub const MENU_OPEN_ID: &str = "open_panel";
+pub const MENU_QUIT_ID: &str = "quit";
 
-/// App 在 update 里轮询到的托盘命令
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 托盘菜单命令
+#[derive(Debug, Clone)]
 pub enum TrayCommand {
-    ToggleWindow,
+    OpenPanel,
     Quit,
 }
 
@@ -22,11 +29,11 @@ pub struct Tray {
 }
 
 impl Tray {
-    /// 创建托盘。失败（极少见）时返回 None，应用退化为普通窗口模式继续运行。
+    /// 创建托盘。失败（极少见）时返回 None，应用退化为无托盘模式继续运行。
     pub fn new() -> Option<Self> {
         let menu = Menu::new();
         if let Err(err) = menu.append_items(&[
-            &MenuItem::with_id(MENU_TOGGLE_ID, "显示 / 隐藏主窗口", true, None),
+            &MenuItem::with_id(MENU_OPEN_ID, "打开主面板", true, None),
             &MenuItem::with_id(MENU_QUIT_ID, "退出 DisplaySmith", true, None),
         ]) {
             log::warn!("托盘菜单创建失败: {err}");
@@ -49,23 +56,35 @@ impl Tray {
         {
             Ok(icon) => Some(Self { _icon: icon }),
             Err(err) => {
-                log::warn!("托盘创建失败（应用将以普通窗口模式运行）: {err}");
+                log::warn!("托盘创建失败（应用将以无托盘模式运行）: {err}");
                 None
             }
         }
     }
+}
 
-    /// 非阻塞取出一条菜单命令；无命令时返回 None
-    pub fn poll_command(&self) -> Option<TrayCommand> {
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            match event.id.0.as_str() {
-                MENU_TOGGLE_ID => return Some(TrayCommand::ToggleWindow),
-                MENU_QUIT_ID => return Some(TrayCommand::Quit),
-                _ => {}
+/// 托盘菜单命令流：后台线程以 500ms 周期轮询全局菜单事件接收器。
+/// 阻塞轮询运行在 iced 的线程池订阅上，不影响 UI 线程。
+pub fn tray_stream() -> impl Stream<Item = TrayCommand> {
+    stream::channel(8, |mut output: Sender<TrayCommand>| async move {
+        let receiver = tray_icon::menu::MenuEvent::receiver();
+        loop {
+            match receiver.recv_timeout(Duration::from_millis(500)) {
+                Ok(event) => {
+                    let command = match event.id.0.as_str() {
+                        MENU_OPEN_ID => Some(TrayCommand::OpenPanel),
+                        MENU_QUIT_ID => Some(TrayCommand::Quit),
+                        _ => None,
+                    };
+                    if let Some(command) = command {
+                        let _ = output.send(command).await;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
         }
-        None
-    }
+    })
 }
 
 /// 用代码光栅化一个 32x32 的显示器形状图标，避免引入图片资源与 image 依赖。

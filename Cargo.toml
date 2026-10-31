@@ -6,9 +6,17 @@ description = "DisplaySmith - macOS 显示分辨率管理工具（菜单栏 + �
 license = "MIT"
 
 [dependencies]
-# glow 后端（OpenGL）：体积最小；显式关闭默认的 wgpu
-eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+# iced 0.14：Elm 架构 + cosmic-text（CJK 自动系统字体回退）
+# macOS 子集 features：x11/wayland/linux-theme-detection 是 Linux 的，去掉减小依赖树
+iced = { version = "0.14.0", default-features = false, features = [
+    "wgpu",
+    "tiny-skia",
+    "crisp",
+    "web-colors",
+    "thread-pool",
+] }
 tray-icon = "0.26.1"
+crossbeam-channel = "0.5"
 log = "0.4"
 env_logger = "0.11"
 
