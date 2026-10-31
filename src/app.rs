@@ -175,22 +175,34 @@ impl DisplaySmithApp {
         ui.add_space(2.0);
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            for mode in &self.modes {
-                ui.horizontal(|ui| {
-                    ui.monospace(mode.pixel_label());
-                    ui.weak(format!("逻辑 {}x{}", mode.logical_width, mode.logical_height));
-                    ui.weak(mode.aspect_label());
-                    ui.monospace(format!("{:.0}Hz", mode.refresh_hz));
-                    if mode.is_hidpi() {
-                        badge(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
-                    }
-                    if ui.button("应用").clicked() {
-                        // 下一阶段实现：CGBeginDisplayConfiguration 事务提交
-                        log::info!("应用模式 {} (待实现)", mode.pixel_label());
+            // Grid 列宽取该列最宽单元格，保证表头、数据、徽章、按钮全列对齐
+            egui::Grid::new("mode_table")
+                .num_columns(6)
+                .spacing([16.0, 2.0])
+                .striped(true)
+                .show(ui, |ui| {
+                    draw_table_header(ui, &["像素分辨率", "逻辑分辨率", "比例", "刷新率", "缩放", "操作"]);
+
+                    for mode in &self.modes {
+                        ui.monospace(mode.pixel_label());
+                        ui.weak(format!(
+                            "{}x{}",
+                            mode.logical_width, mode.logical_height
+                        ));
+                        ui.monospace(mode.aspect_label());
+                        ui.monospace(format!("{:.0} Hz", mode.refresh_hz));
+                        if mode.is_hidpi() {
+                            badge(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
+                        } else {
+                            ui.weak("—");
+                        }
+                        if ui.small_button("应用").clicked() {
+                            // 下一阶段实现：CGBeginDisplayConfiguration 事务提交
+                            log::info!("应用模式 {} (待实现)", mode.pixel_label());
+                        }
+                        ui.end_row();
                     }
                 });
-                ui.separator();
-            }
         });
     }
 
@@ -236,4 +248,12 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         .show(ui, |ui| {
             ui.label(RichText::new(text).small().color(color));
         });
+}
+
+/// 表格表头行：逐列渲染加粗标题后收行
+fn draw_table_header(ui: &mut egui::Ui, titles: &[&str]) {
+    for title in titles {
+        ui.strong(*title);
+    }
+    ui.end_row();
 }
