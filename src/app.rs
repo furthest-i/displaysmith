@@ -26,6 +26,10 @@ pub struct DisplaySmithApp {
     /// 底部状态栏的临时消息（如切换结果反馈）
     status_message: Option<String>,
     status_until: Option<Instant>,
+    /// 比例筛选（None = 全部），取值为 aspect_label 文本
+    aspect_filter: Option<String>,
+    /// 刷新率筛选（None = 全部），取值为取整后的显示文本（如 "120"）
+    hz_filter: Option<String>,
 }
 
 impl DisplaySmithApp {
@@ -48,6 +52,8 @@ impl DisplaySmithApp {
             fonts_ok,
             status_message: None,
             status_until: None,
+            aspect_filter: None,
+            hz_filter: None,
         }
     }
 
@@ -65,6 +71,8 @@ impl DisplaySmithApp {
             .current_display()
             .map(|d| display::list_modes(d.id))
             .unwrap_or_default();
+        self.aspect_filter = None;
+        self.hz_filter = None;
         log::info!(
             "已刷新: {} 台显示器, {} 个模式",
             self.displays.len(),
@@ -79,6 +87,26 @@ impl DisplaySmithApp {
             .current_display()
             .map(|d| display::list_modes(d.id))
             .unwrap_or_default();
+        self.aspect_filter = None;
+        self.hz_filter = None;
+    }
+
+    /// 应用筛选条件后的模式列表
+    fn filtered_modes(&self) -> Vec<DisplayModeInfo> {
+        self.modes
+            .iter()
+            .filter(|mode| {
+                let aspect_ok = self
+                    .aspect_filter
+                    .as_ref()
+                    .is_none_or(|f| mode.aspect_label() == *f);
+                let hz_ok = self.hz_filter.as_ref().is_none_or(|f| {
+                    format!("{:.0}", mode.refresh_hz) == *f
+                });
+                aspect_ok && hz_ok
+            })
+            .copied()
+            .collect()
     }
 
     /// 将当前显示器切换到指定模式，并在底部状态栏反馈结果
@@ -237,7 +265,52 @@ impl DisplaySmithApp {
 
     fn draw_mode_table(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.strong(format!("可用显示模式（{} 个）", self.modes.len()));
+        let filtered = self.filtered_modes();
+
+        ui.horizontal(|ui| {
+            let count_label = if filtered.len() == self.modes.len() {
+                format!("可用显示模式（{} 个）", self.modes.len())
+            } else {
+                format!("可用显示模式（{}/{} 个）", filtered.len(), self.modes.len())
+            };
+            ui.strong(count_label);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // right_to_left：先放的靠右。视觉上从左到右为 比例 -> 刷新率
+                egui::ComboBox::from_id_salt("hz_filter")
+                    .selected_text(
+                        self.hz_filter
+                            .as_ref()
+                            .map(|hz| format!("{hz} Hz"))
+                            .unwrap_or_else(|| "全部刷新率".to_owned()),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.hz_filter, None, "全部刷新率");
+                        for hz in collect_hz_options(&self.modes) {
+                            ui.selectable_value(
+                                &mut self.hz_filter,
+                                Some(hz.clone()),
+                                format!("{hz} Hz"),
+                            );
+                        }
+                    });
+                egui::ComboBox::from_id_salt("aspect_filter")
+                    .selected_text(
+                        self.aspect_filter
+                            .clone()
+                            .unwrap_or_else(|| "全部比例".to_owned()),
+                    )
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.aspect_filter, None, "全部比例");
+                        for aspect in collect_aspect_options(&self.modes) {
+                            ui.selectable_value(
+                                &mut self.aspect_filter,
+                                Some(aspect.clone()),
+                                &aspect,
+                            );
+                        }
+                    });
+            });
+        });
         ui.add_space(2.0);
 
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -251,7 +324,7 @@ impl DisplaySmithApp {
 
                     // 先收集点击、循环结束后再应用：避免迭代借用与可变刷新冲突
                     let mut clicked: Option<DisplayModeInfo> = None;
-                    for mode in &self.modes {
+                    for mode in &filtered {
                         ui.monospace(mode.pixel_label());
                         ui.weak(format!(
                             "{}x{}",
@@ -271,6 +344,11 @@ impl DisplaySmithApp {
                     }
                     if let Some(target) = clicked {
                         self.apply_mode(target);
+                    }
+
+                    if filtered.is_empty() {
+                        ui.weak("当前筛选组合下没有模式，试试放宽条件");
+                        ui.end_row();
                     }
                 });
         });
@@ -317,10 +395,83 @@ fn tinted(ui: &mut egui::Ui, text: &str, color: Color32) {
     ui.label(RichText::new(text).small().color(color));
 }
 
+/// 收集比例筛选选项：按宽高比数值升序去重（竖屏比例自然排最前）
+fn collect_aspect_options(modes: &[DisplayModeInfo]) -> Vec<String> {
+    let mut seen: Vec<(f64, String)> = Vec::new();
+    for mode in modes {
+        if mode.pixel_width == 0 || mode.pixel_height == 0 {
+            continue;
+        }
+        let label = mode.aspect_label();
+        let ratio = mode.pixel_width as f64 / mode.pixel_height as f64;
+        if !seen.iter().any(|(_, existing)| *existing == label) {
+            seen.push((ratio, label));
+        }
+    }
+    seen.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    seen.into_iter().map(|(_, label)| label).collect()
+}
+
+/// 收集刷新率筛选选项：按显示文本去重（59.94 与 60.0 同显 "60"），数值降序
+fn collect_hz_options(modes: &[DisplayModeInfo]) -> Vec<String> {
+    let mut rates: Vec<f64> = modes.iter().map(|mode| mode.refresh_hz).collect();
+    rates.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut labels: Vec<String> = Vec::new();
+    for hz in rates {
+        let label = format!("{hz:.0}");
+        if labels.last() != Some(&label) {
+            labels.push(label);
+        }
+    }
+    labels
+}
+
 /// 表格表头行：逐列渲染加粗标题后收行
 fn draw_table_header(ui: &mut egui::Ui, titles: &[&str]) {
     for title in titles {
         ui.strong(*title);
     }
     ui.end_row();
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::display::DisplayModeInfo;
+
+    fn mode(pixel_width: usize, pixel_height: usize, refresh_hz: f64) -> DisplayModeInfo {
+        DisplayModeInfo {
+            logical_width: pixel_width,
+            logical_height: pixel_height,
+            pixel_width,
+            pixel_height,
+            refresh_hz,
+            io_flags: 0,
+        }
+    }
+
+    #[test]
+    fn aspect_options_sorted_numerically_deduped() {
+        let modes = vec![
+            mode(1920, 1080, 60.0),
+            mode(1920, 1200, 60.0),
+            mode(1920, 1080, 120.0),   // 与第一项同比例，应去重
+            mode(3024, 1964, 120.0),   // 非标准比例 1.54:1
+        ];
+        let options = collect_aspect_options(&modes);
+        assert_eq!(options, vec!["1.54:1", "16:10", "16:9"]);
+    }
+
+    #[test]
+    fn hz_options_sorted_desc_deduped_by_label() {
+        let modes = vec![
+            mode(100, 100, 59.94),
+            mode(100, 100, 60.0),   // 与 59.94 同显 "60"，应去重
+            mode(100, 100, 120.0),
+            mode(100, 100, 48.0),
+        ];
+        let options = collect_hz_options(&modes);
+        assert_eq!(options, vec!["120", "60", "48"]);
+    }
 }
