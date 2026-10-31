@@ -104,10 +104,59 @@ impl DisplayModeInfo {
     }
 }
 
+/// 常用显示比例（横屏形态），按宽高比数值排列
+const COMMON_ASPECTS: &[(usize, usize)] = &[
+    (32, 9),
+    (21, 9),
+    (16, 9),
+    (16, 10),
+    (3, 2),
+    (4, 3),
+    (5, 4),
+    (1, 1),
+];
+
+/// 比例匹配容差。取 2.5%：覆盖 21:9 的行业口径（3440x1440 实为 2.39，业内统称 21:9），
+/// 同时不会把 16:10（1.60）误判成 3:2（1.50），两者相差 6.3%，安全。
+const ASPECT_MATCH_TOLERANCE: f64 = 0.025;
+
 impl DisplayModeInfo {
     /// 像素分辨率短格式，如 "3024x1890"
     pub fn pixel_label(&self) -> String {
         format!("{}x{}", self.pixel_width, self.pixel_height)
+    }
+
+    /// 显示比例标签：命中常用比例表时输出整数比（如 "16:10"），
+    /// 竖屏模式自动翻转（如 "9:16"），非标准比例回退为十进制比（如 "1.54:1"）
+    pub fn aspect_label(&self) -> String {
+        if self.pixel_width == 0 || self.pixel_height == 0 {
+            return "-".to_owned();
+        }
+        let is_landscape = self.pixel_width >= self.pixel_height;
+        let wide = self.pixel_width.max(self.pixel_height);
+        let tall = self.pixel_width.min(self.pixel_height);
+        let ratio = wide as f64 / tall as f64;
+
+        let nearest = COMMON_ASPECTS
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                let diff_a = (ratio - a.0 as f64 / a.1 as f64).abs();
+                let diff_b = (ratio - b.0 as f64 / b.1 as f64).abs();
+                diff_a.partial_cmp(&diff_b).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+        if let Some((w, h)) = nearest {
+            let target = w as f64 / h as f64;
+            if (ratio - target).abs() / target <= ASPECT_MATCH_TOLERANCE {
+                return if is_landscape {
+                    format!("{w}:{h}")
+                } else {
+                    format!("{h}:{w}")
+                };
+            }
+        }
+        format!("{ratio:.2}:1")
     }
 }
 
@@ -210,5 +259,66 @@ fn parse_mode(mode: CgDisplayModeRef) -> DisplayModeInfo {
             refresh_hz: CGDisplayModeGetRefreshRate(mode),
             io_flags: CGDisplayModeGetIOFlags(mode),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode(pixel_width: usize, pixel_height: usize) -> DisplayModeInfo {
+        DisplayModeInfo {
+            logical_width: pixel_width,
+            logical_height: pixel_height,
+            pixel_width,
+            pixel_height,
+            refresh_hz: 60.0,
+            io_flags: 0,
+        }
+    }
+
+    #[test]
+    fn standard_full_hd_matches_16_9() {
+        assert_eq!(mode(1920, 1080).aspect_label(), "16:9");
+    }
+
+    #[test]
+    fn scaled_16_10_matches() {
+        assert_eq!(mode(1920, 1200).aspect_label(), "16:10");
+    }
+
+    #[test]
+    fn hidpi_retina_pixel_ratio_unchanged() {
+        // HiDPI 档位：像素与逻辑同倍缩放，比例不变
+        let mode = DisplayModeInfo {
+            logical_width: 1512,
+            logical_height: 945,
+            pixel_width: 3024,
+            pixel_height: 1890,
+            refresh_hz: 120.0,
+            io_flags: 0,
+        };
+        assert_eq!(mode.aspect_label(), "16:10");
+    }
+
+    #[test]
+    fn builtin_nonstandard_falls_back_to_decimal() {
+        assert_eq!(mode(3024, 1964).aspect_label(), "1.54:1");
+    }
+
+    #[test]
+    fn portrait_flips_ratio_text() {
+        assert_eq!(mode(1080, 1920).aspect_label(), "9:16");
+    }
+
+    #[test]
+    fn ultrawide_3440x1440_matches_21_9() {
+        // 3440x1440 精确值为 2.39，按行业口径归入 21:9（容差 2.5%）
+        assert_eq!(mode(3440, 1440).aspect_label(), "21:9");
+    }
+
+    #[test]
+    fn zero_size_uses_placeholder() {
+        assert_eq!(mode(0, 0).aspect_label(), "-");
     }
 }

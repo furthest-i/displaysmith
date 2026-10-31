@@ -152,11 +152,12 @@ impl DisplaySmithApp {
             ui.add_space(2.0);
             let current = &display.current;
             ui.monospace(format!(
-                "当前: {}x{} (像素 {}x{}) @ {:.0} Hz",
+                "当前: {}x{} (像素 {}x{}) · {} @ {:.0} Hz",
                 current.logical_width,
                 current.logical_height,
                 current.pixel_width,
                 current.pixel_height,
+                current.aspect_label(),
                 current.refresh_hz
             ));
             ui.horizontal(|ui| {
@@ -178,6 +179,7 @@ impl DisplaySmithApp {
                 ui.horizontal(|ui| {
                     ui.monospace(mode.pixel_label());
                     ui.weak(format!("逻辑 {}x{}", mode.logical_width, mode.logical_height));
+                    ui.weak(mode.aspect_label());
                     ui.monospace(format!("{:.0}Hz", mode.refresh_hz));
                     if mode.is_hidpi() {
                         badge(ui, "HiDPI", Color32::from_rgb(134, 200, 134));
