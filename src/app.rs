@@ -173,8 +173,10 @@ pub enum Message {
     ApplyMode(DisplayModeInfo),
     /// 托盘打开的主面板窗口已创建
     PanelOpened(window::Id),
-    /// 某个窗口已关闭
+    /// 某个窗口已关闭（销毁）
     PanelClosed(window::Id),
+    /// 用户请求关闭某个窗口（点击红色关闭按钮）
+    PanelCloseRequested(window::Id),
 }
 
 pub fn update(state: &mut DisplaySmith, message: Message) -> Task<Message> {
@@ -215,14 +217,28 @@ pub fn update(state: &mut DisplaySmith, message: Message) -> Task<Message> {
             }
             Task::none()
         }
+        Message::PanelCloseRequested(id) => {
+            // 红点 = 收起面板：exit_on_close_request=false 时 iced 不会自动关窗，
+            // 需显式销毁并清空句柄，否则后续"打开主面板"会指向已不可见的窗口
+            if state.panel_id == Some(id) {
+                log::info!("面板窗口收起 (id={:?})", id);
+                state.panel_id = None;
+                window::close(id)
+            } else {
+                Task::none()
+            }
+        }
     }
 }
 
 /// 托盘"打开主面板"：未打开则新开窗口，已打开则聚焦
 fn open_panel(state: &mut DisplaySmith) -> Task<Message> {
     if let Some(id) = state.panel_id {
-        return window::gain_focus(id);
+        log::info!("面板已存在 (id={:?})，还原并聚焦", id);
+        // 窗口可能被最小化：gain_focus 不会还原最小化状态，先还原再聚焦
+        return Task::batch([window::minimize(id, false), window::gain_focus(id)]);
     }
+    log::info!("打开新的面板窗口");
     let (id, task) = window::open(window::Settings {
         size: iced::Size::new(920.0, 620.0),
         min_size: Some(iced::Size::new(740.0, 480.0)),
@@ -238,6 +254,12 @@ pub fn subscription(_state: &DisplaySmith) -> Subscription<Message> {
     Subscription::batch([
         Subscription::run(tray::tray_stream).map(Message::Tray),
         window::close_events().map(Message::PanelClosed),
+        iced::event::listen_with(|event, _status, id| match event {
+            iced::Event::Window(window::Event::CloseRequested) => {
+                Some(Message::PanelCloseRequested(id))
+            }
+            _ => None,
+        }),
     ])
 }
 
