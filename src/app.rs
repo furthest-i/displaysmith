@@ -3,8 +3,8 @@
 //! 状态流转：Subscription 推送托盘命令 / 窗口关闭事件，widget 交互直接发 Message，
 //! update 统一修改状态，view 由状态推导整棵界面树。
 
-use iced::widget::space;
 use iced::widget::{button, column, pick_list, row, scrollable, table, text};
+use iced::widget::space;
 use iced::{window, Color, Element, Subscription, Task};
 
 use crate::display::{self, DisplayInfo, DisplayModeInfo};
@@ -72,6 +72,7 @@ impl Default for DisplaySmith {
 impl DisplaySmith {
     /// 重新枚举显示器与模式；选中显示器按 id 保持，失联则回退主显示器
     fn refresh(&mut self) {
+        let previous_id = self.selected.as_ref().map(|d| d.id);
         self.displays = display::list_displays();
         let still_online = self
             .selected
@@ -85,8 +86,12 @@ impl DisplaySmith {
             .as_ref()
             .map(|d| display::list_modes(d.id))
             .unwrap_or_default();
-        self.aspect_filter = None;
-        self.hz_filter = None;
+        // 显示器未变化时保留筛选：应用模式后的刷新不应重置用户筛选；
+        // 显示器变化则清空（新显示器的选项集合不同，保留旧值易产生空结果的误解）
+        if self.selected.as_ref().map(|d| d.id) != previous_id {
+            self.aspect_filter = None;
+            self.hz_filter = None;
+        }
         log::info!(
             "已刷新: {} 台显示器, {} 个模式",
             self.displays.len(),
@@ -171,6 +176,8 @@ pub enum Message {
     HertzFilterChanged(FilterOption),
     /// 应用显示模式
     ApplyMode(DisplayModeInfo),
+    /// 回到显示器默认分辨率
+    ApplyDefaultMode,
     /// 托盘打开的主面板窗口已创建
     PanelOpened(window::Id),
     /// 某个窗口已关闭（销毁）
@@ -204,6 +211,17 @@ pub fn update(state: &mut DisplaySmith, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::ApplyMode(target) => {
+            state.apply_mode(&target);
+            Task::none()
+        }
+        Message::ApplyDefaultMode => {
+            let Some(display) = state.selected.as_ref() else {
+                return Task::none();
+            };
+            let Some(target) = display::find_default_mode(display, &state.modes) else {
+                state.status_message = Some("未找到默认模式".to_owned());
+                return Task::none();
+            };
             state.apply_mode(&target);
             Task::none()
         }
@@ -335,7 +353,13 @@ fn status_card<'a>(state: &'a DisplaySmith) -> Element<'a, Message> {
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center),
-        text(format!("位置: ({}, {})", display.origin.0, display.origin.1)).size(13),
+        row![
+            text(format!("位置: ({}, {})", display.origin.0, display.origin.1)).size(13),
+            space::horizontal(),
+            button("回到默认分辨率").on_press(Message::ApplyDefaultMode),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center),
     ]
     .spacing(4)
     .into()
@@ -344,6 +368,10 @@ fn status_card<'a>(state: &'a DisplaySmith) -> Element<'a, Message> {
 /// 模式列表区：标题 + 筛选下拉 + 数据表
 fn mode_section<'a>(state: &'a DisplaySmith) -> Element<'a, Message> {
     let filtered = state.filtered_modes();
+    let default_mode = state
+        .selected
+        .as_ref()
+        .and_then(|display| display::find_default_mode(display, &state.modes));
     let count_label = if filtered.len() == state.modes.len() {
         format!("可用显示模式（{} 个）", state.modes.len())
     } else {
@@ -372,14 +400,14 @@ fn mode_section<'a>(state: &'a DisplaySmith) -> Element<'a, Message> {
             text("比例:"),
             pick_list(
                 aspect_options,
-                state.aspect_filter.clone().map(|value| FilterOption(Some(value))),
+                Some(FilterOption(state.aspect_filter.clone())),
                 Message::AspectFilterChanged
             )
             .width(120),
             text("刷新率:"),
             pick_list(
                 hz_options,
-                state.hz_filter.clone().map(|value| FilterOption(Some(value))),
+                Some(FilterOption(state.hz_filter.clone())),
                 Message::HertzFilterChanged
             )
             .width(100),
@@ -403,11 +431,25 @@ fn mode_section<'a>(state: &'a DisplaySmith) -> Element<'a, Message> {
                         "{:.0} Hz",
                         mode.refresh_hz
                     ))),
-                    table::column(text("缩放"), |mode: DisplayModeInfo| if mode.is_hidpi() {
-                        text("HiDPI").size(12).color(COLOR_OK)
-                    } else {
-                        text("—")
-                    }),
+                    table::column(
+                        text("缩放"),
+                        move |mode: DisplayModeInfo| {
+                            let hidpi = if mode.is_hidpi() {
+                                text("HiDPI").size(12).color(COLOR_OK)
+                            } else {
+                                text("—")
+                            };
+                            // 默认模式 = 系统设置"默认"选项指向的档位
+                            let cell: Element<Message> = if Some(mode) == default_mode {
+                                row![hidpi, text("默认").size(12).color(COLOR_INFO)]
+                                    .spacing(4)
+                                    .into()
+                            } else {
+                                hidpi.into()
+                            };
+                            cell
+                        },
+                    ),
                     table::column(text("操作"), |mode: DisplayModeInfo| button("应用")
                         .on_press(Message::ApplyMode(mode))),
                 ],

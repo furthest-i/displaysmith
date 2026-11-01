@@ -37,6 +37,11 @@ fn main() -> iced::Result {
         app::update,
         app::view,
     )
+    .settings(iced::Settings {
+        // macOS 系统标准字号 13px，与原生应用保持一致
+        default_text_size: iced::Pixels(13.0),
+        ..Default::default()
+    })
     .subscription(app::subscription)
     .theme(Theme::Dark)
     .title("DisplaySmith")

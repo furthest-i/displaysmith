@@ -7,4 +7,4 @@
 
 pub mod modes;
 
-pub use modes::{apply_mode, list_displays, list_modes, DisplayInfo, DisplayModeInfo};
+pub use modes::{apply_mode, find_default_mode, list_displays, list_modes, DisplayInfo, DisplayModeInfo};

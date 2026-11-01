@@ -73,6 +73,8 @@ unsafe extern "C" {
     fn CGDisplayIsBuiltin(display: CgDisplayId) -> u8;
     fn CGDisplayCopyAllDisplayModes(display: CgDisplayId, options: *const c_void) -> CfArrayRef;
     fn CGDisplayCopyDisplayMode(display: CgDisplayId) -> CgDisplayModeRef;
+    fn CGDisplayPixelsWide(display: CgDisplayId) -> usize;
+    fn CGDisplayPixelsHigh(display: CgDisplayId) -> usize;
     fn CGBeginDisplayConfiguration(config: *mut CgDisplayConfigRef) -> c_int;
     fn CGConfigureDisplayWithDisplayMode(
         config: CgDisplayConfigRef,
@@ -99,6 +101,8 @@ pub struct DisplayInfo {
     pub is_main: bool,
     /// 屏幕坐标原点（多屏排列位置）
     pub origin: (f64, f64),
+    /// 面板物理原生分辨率（像素），用于判定"默认分辨率"
+    pub native_pixel: (usize, usize),
     pub current: DisplayModeInfo,
 }
 
@@ -204,6 +208,9 @@ pub fn list_displays() -> Vec<DisplayInfo> {
                 is_builtin,
                 is_main: id == main_id,
                 origin: (bounds.origin.x, bounds.origin.y),
+                native_pixel: unsafe {
+                    (CGDisplayPixelsWide(id), CGDisplayPixelsHigh(id))
+                },
                 current,
             }
         })
@@ -318,6 +325,28 @@ fn commit_mode(display_id: CgDisplayId, mode_ref: CgDisplayModeRef) -> Result<()
         }
         Ok(())
     }
+}
+
+/// 判定显示器的"默认模式"：像素分辨率等于面板原生分辨率、HiDPI、刷新率最高的档位。
+/// 与系统设置显示器界面"默认"选项的实际指向一致（如内建屏 3024x1964@120Hz HiDPI）。
+/// 现代 macOS 不再设置 kDisplayModeDefaultFlag（0x8），无法直接从模式标志读取。
+pub fn find_default_mode(
+    display: &DisplayInfo,
+    modes: &[DisplayModeInfo],
+) -> Option<DisplayModeInfo> {
+    modes
+        .iter()
+        .filter(|mode| {
+            mode.is_hidpi()
+                && mode.pixel_width == display.native_pixel.0
+                && mode.pixel_height == display.native_pixel.1
+        })
+        .max_by(|a, b| {
+            a.refresh_hz
+                .partial_cmp(&b.refresh_hz)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied()
 }
 
 fn display_ids() -> Vec<CgDisplayId> {
@@ -481,5 +510,58 @@ mod real_switch_tests {
         println!("切回: {:.0}Hz", current.refresh_hz);
         apply_mode(target_display.id, &current).expect("切回原刷新率失败");
         println!("round-trip 通过 ({alt_label} 往返)");
+    }
+}
+
+#[cfg(test)]
+mod default_mode_tests {
+    use super::*;
+
+    fn mode(pixel_width: usize, pixel_height: usize, logical: usize, refresh_hz: f64) -> DisplayModeInfo {
+        DisplayModeInfo {
+            logical_width: logical,
+            logical_height: logical,
+            pixel_width,
+            pixel_height,
+            refresh_hz,
+            io_flags: 0,
+        }
+    }
+
+    #[test]
+    fn default_mode_prefers_native_hidpi_highest_hz() {
+        let display = DisplayInfo {
+            id: 1,
+            title: "test".to_owned(),
+            is_builtin: true,
+            is_main: true,
+            origin: (0.0, 0.0),
+            native_pixel: (3024, 1964),
+            current: mode(3024, 1964, 1512, 120.0),
+        };
+        let modes = vec![
+            mode(3600, 2338, 1800, 120.0),   // scaled 模式，像素不等于原生，应排除
+            mode(3024, 1964, 1512, 60.0),    // 原生 HiDPI 但刷新率低
+            mode(3024, 1964, 3024, 120.0),   // 原生但非 HiDPI，应排除
+            mode(3024, 1964, 1512, 120.0),   // 原生 HiDPI 最高刷新率 -> 应选中
+        ];
+        let result = find_default_mode(&display, &modes).expect("应找到默认模式");
+        assert_eq!(result.refresh_hz, 120.0);
+        assert_eq!(result.logical_width, 1512);
+    }
+
+    #[test]
+    fn default_mode_none_when_native_missing() {
+        let display = DisplayInfo {
+            id: 1,
+            title: "test".to_owned(),
+            is_builtin: false,
+            is_main: false,
+            origin: (0.0, 0.0),
+            native_pixel: (9999, 9999),
+            current: mode(1, 1, 1, 60.0),
+        };
+        let modes = vec![mode(5120, 2160, 2560, 100.0)];
+        assert!(find_default_mode(&display, &modes).is_none());
     }
 }
