@@ -5,8 +5,7 @@
 
 use iced::widget::space;
 use iced::widget::{button, column, pick_list, row, scrollable, table, text};
-use iced::{window, Color, Element, Subscription, Task, Theme};
-use tray_icon::TrayIcon;
+use iced::{window, Color, Element, Subscription, Task};
 
 use crate::display::{self, DisplayInfo, DisplayModeInfo};
 use crate::tray::{self, Tray, TrayCommand};
@@ -31,7 +30,8 @@ impl std::fmt::Display for FilterOption {
 
 /// 应用状态
 pub struct DisplaySmith {
-    tray: Option<Tray>,
+    /// 下划线前缀：字段仅用于保活托盘图标（drop 即移除菜单栏图标），无需读取
+    _tray: Option<Tray>,
     displays: Vec<DisplayInfo>,
     /// 当前选中的显示器
     selected: Option<DisplayInfo>,
@@ -57,7 +57,7 @@ impl Default for DisplaySmith {
         log::info!("启动完成: {} 台显示器", displays.len());
 
         Self {
-            tray: Tray::new(),
+            _tray: Tray::new(),
             displays,
             selected,
             modes,
