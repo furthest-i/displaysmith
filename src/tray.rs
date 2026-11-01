@@ -63,26 +63,43 @@ impl Tray {
     }
 }
 
-/// 托盘菜单命令流：后台线程以 500ms 周期轮询全局菜单事件接收器。
-/// 阻塞轮询运行在 iced 的线程池订阅上，不影响 UI 线程。
+/// 托盘菜单命令流。
+///
+/// crossbeam 的 `recv_timeout` 是阻塞调用，不能直接跑在 iced 的线程池订阅上——
+/// 它会占死执行线程，导致同一 stream 上向 runtime 递交消息的另一半永远不被轮询
+/// （表现为菜单事件收到、界面却无响应）。因此把阻塞轮询放到独立线程，
+/// 经无界 channel 桥接回异步侧，转发线程在无事件时真正挂起让出。
 pub fn tray_stream() -> impl Stream<Item = TrayCommand> {
     stream::channel(8, |mut output: Sender<TrayCommand>| async move {
-        let receiver = tray_icon::menu::MenuEvent::receiver();
-        loop {
-            match receiver.recv_timeout(Duration::from_millis(500)) {
-                Ok(event) => {
-                    let command = match event.id.0.as_str() {
-                        MENU_OPEN_ID => Some(TrayCommand::OpenPanel),
-                        MENU_QUIT_ID => Some(TrayCommand::Quit),
-                        _ => None,
-                    };
-                    if let Some(command) = command {
-                        let _ = output.send(command).await;
+        let (forward_tx, mut forward_rx) =
+            iced::futures::channel::mpsc::unbounded::<TrayCommand>();
+
+        std::thread::spawn(move || {
+            let receiver = tray_icon::menu::MenuEvent::receiver();
+            loop {
+                match receiver.recv_timeout(Duration::from_millis(500)) {
+                    Ok(event) => {
+                        log::info!("收到托盘菜单事件: id={:?}", event.id.0);
+                        let command = match event.id.0.as_str() {
+                            MENU_OPEN_ID => Some(TrayCommand::OpenPanel),
+                            MENU_QUIT_ID => Some(TrayCommand::Quit),
+                            _ => None,
+                        };
+                        if let Some(command) = command
+                            && forward_tx.unbounded_send(command).is_err()
+                        {
+                            break; // 应用退出，转发通道已关闭
+                        }
                     }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
+        });
+
+        use iced::futures::StreamExt;
+        while let Some(command) = forward_rx.next().await {
+            let _ = output.send(command).await;
         }
     })
 }

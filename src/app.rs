@@ -178,9 +178,13 @@ pub enum Message {
 }
 
 pub fn update(state: &mut DisplaySmith, message: Message) -> Task<Message> {
+    log::debug!("update 收到消息: {:?}", message);
     match message {
         Message::Tray(TrayCommand::Quit) => iced::exit(),
-        Message::Tray(TrayCommand::OpenPanel) => open_panel(state),
+        Message::Tray(TrayCommand::OpenPanel) => {
+            log::info!("托盘命令: 打开主面板, 当前 panel_id={:?}", state.panel_id);
+            open_panel(state)
+        }
         Message::DisplaySelected(info) => {
             state.select_display(&info);
             Task::none()
